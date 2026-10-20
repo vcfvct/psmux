@@ -1,0 +1,73 @@
+name: Validate Ctrl bracket fix
+
+on:
+  push:
+    branches: [validation/ctrl-bracket]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+      - name: Confirm regression fails without the fix
+        shell: pwsh
+        run: |
+          $path = 'src/input.rs'
+          $source = Get-Content -Raw $path
+          $source = $source.Replace('write_pane_input(p, &[ctrl_char]);', 'let _ = p.writer.write_all(&[ctrl_char]); let _ = p.writer.flush();')
+          $source = $source.Replace('write_pane_input(p, &[byte]);', 'let _ = p.writer.write_all(&[byte]); let _ = p.writer.flush();')
+          Set-Content -Path $path -Value $source -NoNewline
+          cargo test --locked --bin psmux tests_issue879_ctrl_bracket_escape -- --test-threads=1 2>&1 | Tee-Object baseline-test.log
+          $code = $LASTEXITCODE
+          git restore -- src/input.rs
+          if ($code -eq 0) { throw 'Regression test incorrectly passed without the fix' }
+          $log = Get-Content -Raw baseline-test.log
+          if ($log -notmatch 'escape_aliases_follow_physical_escape_after_a_named_key_latches_the_pane \.\.\. FAILED') {
+            throw 'Baseline failed for a reason other than the expected regression assertion'
+          }
+          exit 0
+      - name: Confirm regression passes with the fix
+        shell: pwsh
+        run: |
+          cargo test --locked --bin psmux tests_issue879_ctrl_bracket_escape -- --test-threads=1 2>&1 | Tee-Object fixed-test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run related input tests
+        shell: pwsh
+        run: |
+          foreach ($filter in @('tests_issue588_', 'tests_issue845_', 'tests_issue394_', 'tests_issue226_', 'tests_issue623_')) {
+            cargo test --locked --bin psmux $filter -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Check and build the fixed binary
+        shell: pwsh
+        run: |
+          cargo check --locked --bin psmux
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --bin psmux
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check regression test formatting
+        shell: pwsh
+        run: |
+          rustfmt --edition 2021 --check tests-rs/test_issue879_ctrl_bracket_escape.rs
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ctrl-bracket-validation
+          path: |
+            baseline-test.log
+            fixed-test.log
+            target/debug/psmux.exe
+          if-no-files-found: warn
